@@ -1,0 +1,89 @@
+timestamps {
+
+node () {
+        stage ('Checkout') {
+ 	        checkout([$class: 'GitSCM', branches: [[name: '*/main']], extensions: [], userRemoteConfigs: [[url: 'https://github.com/Avudaithangam/springboot-maven.git']]]) 
+	    }
+	    stage ('BuildAndTest') {
+        	withMaven(maven: 'maven-latest') {
+        	withSonarQubeEnv(credentialsId: 'd30f09b7-041f-4927-aff9-16052b24323e', installationName: 'sonar') {    
+     			if(isUnix()) {
+     				sh """
+         				mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:3.7.0.1746:sonar package
+     				""" 
+    			} else { 
+     				bat """
+     				    mvn clean verify org.sonarsource.scanner.maven:sonar-maven-plugin:3.7.0.1746:sonar package
+     				""" 
+         		} 
+        	}}
+        }
+        stage("Quality Gate"){
+          timeout(time: 1, unit: 'HOURS') { // Just in case something goes wrong, pipeline will be killed after a timeout
+            def qg = waitForQualityGate() // Reuse taskId previously collected by withSonarQubeEnv
+            if (qg.status != 'OK') {
+              error "Pipeline aborted due to quality gate failure: ${qg.status}"
+            }
+          }
+        }
+	    stage ('Docker push to nexus repository') {
+ 	        if(isUnix()) {
+ 				sh """
+ 				    docker build -t demo:${BUILD_NUMBER} .
+ 				    docker tag demo:${BUILD_NUMBER} nexus:8082/demo:${BUILD_NUMBER}
+ 				    docker login -u admin -p admin nexus:8082
+ 				    docker push nexus:8082/demo:${BUILD_NUMBER}
+ 				""" 
+			} else { 
+ 				bat """
+ 				    docker build -t demo:${BUILD_NUMBER} .
+ 				    docker tag demo:${BUILD_NUMBER} nexus:8082/demo:${BUILD_NUMBER}
+ 				    docker login -u admin -p admin nexus:8082
+ 				    docker push nexus:8082/demo:${BUILD_NUMBER}
+ 				""" 
+ 		    }  
+	    }
+	    stage('deploy'){
+	        if(isUnix()) {
+ 				sh """
+ 				    docker pull nexus:8082/demo:${BUILD_NUMBER}
+	                docker run -itd -p 8084:8084 --name spring${BUILD_NUMBER} demo:${BUILD_NUMBER}
+	            """
+	        } else {      
+	            bat """
+	            docker pull nexus:8082/demo:${BUILD_NUMBER}
+	            docker run -itd -p 8084:8084 --name spring${BUILD_NUMBER} demo:${BUILD_NUMBER}
+	            
+	            """
+	        }
+	    }
+	    stage('Run healthCheck'){
+	        if(isUnix()) {
+ 				sh '''
+ 				    status=$(curl http://localhost:8084/actuator/health 2>/dev/null |jq -r '.status')
+					if [ "$status" = "UP" ]; then 
+							echo "The Application is up and running" 
+						else
+								echo "There is an error with the application, Please check the application."  
+					fi;
+
+	            '''
+			} else { 
+				powershell '''
+					Start-Sleep -s 10
+					if((Invoke-RestMethod -uri http://localhost:8084/actuator/health | Format-Table -HideTableHeaders| out-string).Trim() -eq "UP"){
+					   write-host("The Application is up and running")
+					}else {
+					   write-host("There is an error with the application, Please check the application.")
+					}
+                '''
+			}
+	    }
+	    stage('cleanup'){
+	        bat """
+	            docker rm -f spring${BUILD_NUMBER}
+	        """
+			 step([$class: 'WsCleanup'])
+	    }
+    }
+}
